@@ -135,6 +135,7 @@ jobs:
             
             # Create .env file on server
             cat > .env << 'EOL'
+            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
             POSTGRES_DB=${{ secrets.POSTGRES_DB }}
             POSTGRES_USER=${{ secrets.POSTGRES_USER }}
             POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
@@ -151,12 +152,17 @@ jobs:
             sudo docker compose -f docker-compose.production.yml down
             sudo docker compose -f docker-compose.production.yml up -d
             
-            # Run migrations and collect static
-            sudo docker compose -f docker-compose.production.yml exec -T backend python manage.py migrate
-            sudo docker compose -f docker-compose.production.yml exec -T backend python manage.py collectstatic --no-input
+            # Wait for backend to be ready
+            sleep 10
             
-            # Copy static files to volume
-            sudo docker compose -f docker-compose.production.yml cp backend:/app/collected_static/. gateway:/static/
+            # Run migrations
+            sudo docker compose -f docker-compose.production.yml exec -T backend python manage.py migrate
+            
+            # Collect static files
+            sudo docker compose -f docker-compose.production.yml run --rm backend python manage.py collectstatic --no-input
+            
+            # Copy static files to gateway volume
+            sudo docker cp $(sudo docker compose -f docker-compose.production.yml ps -q backend):/app/collected_static/. $(sudo docker compose -f docker-compose.production.yml ps -q gateway):/static/
 
   auto_tests:
     runs-on: ubuntu-latest
