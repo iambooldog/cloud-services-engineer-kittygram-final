@@ -1,0 +1,210 @@
+name: Main Kittygram Workflow
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: kittygram_user
+          POSTGRES_PASSWORD: kittygram_password
+          POSTGRES_DB: kittygram
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ./backend/requirements.txt
+
+      - name: Test backend with pytest
+        env:
+          POSTGRES_USER: kittygram_user
+          POSTGRES_PASSWORD: kittygram_password
+          POSTGRES_DB: kittygram
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          DJANGO_SETTINGS_MODULE: kittygram_backend.settings
+          DJANGO_DEBUG: "False"
+          SECRET_KEY: "test-secret-key-for-ci"
+        run: |
+          cd backend
+          python manage.py test
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Test frontend
+        run: |
+          cd frontend
+          npm test -- --passWithNoTests
+
+      - name: PEP8 check
+        continue-on-error: true
+        run: |
+          pip install flake8
+          flake8 backend/
+
+  build_and_push_to_docker_hub:
+    name: Push Docker image to Docker Hub
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Push backend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/kittygram_backend:latest
+
+      - name: Push frontend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/kittygram_frontend:latest
+
+      - name: Push gateway
+        uses: docker/build-push-action@v4
+        with:
+          context: ./nginx
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/kittygram_gateway:latest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build_and_push_to_docker_hub
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Copy docker-compose.production.yml via ssh
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          source: "docker-compose.production.yml"
+          target: "kittygram"
+          strip_components: 0
+
+      - name: Copy .env file via ssh
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          source: ".env"
+          target: "kittygram"
+          strip_components: 0
+
+      - name: Executing remote ssh commands to deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          script: |
+            cd kittygram
+            
+            # Create .env file on server
+            cat > .env << 'EOL'
+            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_HOST=db
+            POSTGRES_PORT=5432
+            SECRET_KEY=${{ secrets.SECRET_KEY }}
+            DEBUG=False
+            EOL
+            
+            # Pull new images
+            docker compose -f docker-compose.production.yml pull
+            
+            # Recreate containers
+            docker compose -f docker-compose.production.yml down
+            docker compose -f docker-compose.production.yml up -d
+            
+            # Run migrations and collect static
+            docker compose -f docker-compose.production.yml exec -T backend python manage.py migrate
+            docker compose -f docker-compose.production.yml exec -T backend python manage.py collectstatic --no-input
+            
+            # Copy static files to volume
+            docker compose -f docker-compose.production.yml cp backend:/app/collected_static/. gateway:/static/
+
+  auto_tests:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ./backend/requirements.txt
+          pip install pytest requests
+
+      - name: Run auto tests
+        env:
+          KITTYGRAM_DOMAIN: ${{ secrets.KITTYGRAM_DOMAIN }}
+        run: |
+          pytest ./tests/
+
+  telegram-notify:
+    runs-on: ubuntu-latest
+    needs: auto_tests
+    if: success()
+    steps:
+      - name: Send Telegram message
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          message: |
+            ✅ Деплой Kittygram успешно завершен!
+            Коммит: ${{ github.event.head_commit.message }}
+            Автор: ${{ github.actor }}
+            Ссылка: ${{ secrets.KITTYGRAM_DOMAIN }}
