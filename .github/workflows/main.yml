@@ -145,18 +145,18 @@ jobs:
             EOL
             
             # Pull new images
-            docker compose -f docker-compose.production.yml pull
+            sudo docker compose -f docker-compose.production.yml pull
             
             # Recreate containers
-            docker compose -f docker-compose.production.yml down
-            docker compose -f docker-compose.production.yml up -d
+            sudo docker compose -f docker-compose.production.yml down
+            sudo docker compose -f docker-compose.production.yml up -d
             
             # Run migrations and collect static
-            docker compose -f docker-compose.production.yml exec -T backend python manage.py migrate
-            docker compose -f docker-compose.production.yml exec -T backend python manage.py collectstatic --no-input
+            sudo docker compose -f docker-compose.production.yml exec -T backend python manage.py migrate
+            sudo docker compose -f docker-compose.production.yml exec -T backend python manage.py collectstatic --no-input
             
             # Copy static files to volume
-            docker compose -f docker-compose.production.yml cp backend:/app/collected_static/. gateway:/static/
+            sudo docker compose -f docker-compose.production.yml cp backend:/app/collected_static/. gateway:/static/
 
   auto_tests:
     runs-on: ubuntu-latest
